@@ -2,10 +2,20 @@ language: objective-c
 before_install:
   - brew update
   - brew reinstall xctool
-  - gem update cocoapods
-xcode_workspace: AsyncDisplayKit.xcworkspace
-xcode_scheme: AsyncDisplayKit
-xcode_sdk:
-  - iphonesimulator7.0
-  - iphonesimulator7.1
-  - iphonesimulator8.0
+  - gem install cocoapods -v 0.38.2
+  - gem install slather
+  - xcrun simctl list
+install: echo "<3"
+env:
+  - MODE=tests
+  - MODE=examples
+  - MODE=life-without-cocoapods
+  - MODE=framework
+script: ./build.sh $MODE
+after_success:
+  - slather
+
+# whitelist
+branches:
+  only:
+    - master

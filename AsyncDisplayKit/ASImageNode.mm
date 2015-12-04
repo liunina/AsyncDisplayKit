@@ -13,8 +13,12 @@
 #import <AsyncDisplayKit/ASAssert.h>
 #import <AsyncDisplayKit/ASDisplayNode+Subclasses.h>
 #import <AsyncDisplayKit/ASDisplayNodeInternal.h>
+#import <AsyncDisplayKit/ASDisplayNodeExtras.h>
 
 #import "ASImageNode+CGExtras.h"
+
+#import "ASInternalHelpers.h"
+#import "ASEqualityHelpers.h"
 
 @interface _ASImageNodeDrawParameters : NSObject
 
@@ -23,7 +27,6 @@
 @property (nonatomic, retain) UIImage *image;
 @property (nonatomic, assign) CGRect bounds;
 @property (nonatomic, assign) CGFloat contentsScale;
-@property (nonatomic, assign) ASImageNodeTint tint;
 @property (nonatomic, retain) UIColor *backgroundColor;
 @property (nonatomic, assign) UIViewContentMode contentMode;
 @property (nonatomic, assign) CGRect cropRect;
@@ -34,7 +37,7 @@
 // TODO: eliminate explicit parameters with a set of keys copied from the node
 @implementation _ASImageNodeDrawParameters
 
-- (id)initWithCrop:(BOOL)cropEnabled opaque:(BOOL)opaque image:(UIImage *)image bounds:(CGRect)bounds contentsScale:(CGFloat)contentsScale backgroundColor:(UIColor *)backgroundColor tint:(ASImageNodeTint)tint contentMode:(UIViewContentMode)contentMode cropRect:(CGRect)cropRect imageModificationBlock:(asimagenode_modification_block_t)imageModificationBlock
+- (id)initWithCrop:(BOOL)cropEnabled opaque:(BOOL)opaque image:(UIImage *)image bounds:(CGRect)bounds contentsScale:(CGFloat)contentsScale backgroundColor:(UIColor *)backgroundColor contentMode:(UIViewContentMode)contentMode cropRect:(CGRect)cropRect imageModificationBlock:(asimagenode_modification_block_t)imageModificationBlock
 {
   self = [self init];
   if (!self) return nil;
@@ -45,7 +48,6 @@
   _bounds = bounds;
   _contentsScale = contentsScale;
   _backgroundColor = backgroundColor;
-  _tint = tint;
   _contentMode = contentMode;
   _cropRect = cropRect;
   _imageModificationBlock = [imageModificationBlock copy];
@@ -55,7 +57,7 @@
 
 - (NSString *)description
 {
-  return [NSString stringWithFormat:@"<%@ : %p image:%@ cropEnabled:%@ opaque:%@ bounds:%@ contentsScale:%.2f backgroundColor:%@ tint:%zd contentMode:%@ cropRect:%@>", [self class], self, self.image, @(self.cropEnabled), @(self.opaque), NSStringFromCGRect(self.bounds), self.contentsScale, self.backgroundColor, self.tint, ASDisplayNodeNSStringFromUIContentMode(self.contentMode), NSStringFromCGRect(self.cropRect)];
+  return [NSString stringWithFormat:@"<%@ : %p image:%@ cropEnabled:%@ opaque:%@ bounds:%@ contentsScale:%.2f backgroundColor:%@ contentMode:%@ cropRect:%@>", [self class], self, self.image, @(self.cropEnabled), @(self.opaque), NSStringFromCGRect(self.bounds), self.contentsScale, self.backgroundColor, ASDisplayNodeNSStringFromUIContentMode(self.contentMode), NSStringFromCGRect(self.cropRect)];
 }
 
 @end
@@ -71,7 +73,6 @@
 
   // Cropping.
   BOOL _cropEnabled; // Defaults to YES.
-  ASImageNodeTint _tint;
   CGRect _cropRect; // Defaults to CGRectMake(0.5, 0.5, 0, 0)
   CGRect _cropDisplayBounds;
 }
@@ -84,21 +85,37 @@
     return nil;
 
   // TODO can this be removed?
-  self.contentsScale = ASDisplayNodeScreenScale();
+  self.contentsScale = ASScreenScale();
   self.contentMode = UIViewContentModeScaleAspectFill;
-  self.opaque = YES;
+  self.opaque = NO;
 
   _cropEnabled = YES;
   _cropRect = CGRectMake(0.5, 0.5, 0, 0);
   _cropDisplayBounds = CGRectNull;
+  _placeholderColor = ASDisplayNodeDefaultPlaceholderColor();
 
   return self;
+}
+
+- (instancetype)initWithLayerBlock:(ASDisplayNodeLayerBlock)viewBlock didLoadBlock:(ASDisplayNodeDidLoadBlock)didLoadBlock
+{
+  ASDisplayNodeAssertNotSupported();
+  return nil;
+}
+
+- (instancetype)initWithViewBlock:(ASDisplayNodeViewBlock)viewBlock didLoadBlock:(ASDisplayNodeDidLoadBlock)didLoadBlock
+{
+  ASDisplayNodeAssertNotSupported();
+  return nil;
 }
 
 - (CGSize)calculateSizeThatFits:(CGSize)constrainedSize
 {
   ASDN::MutexLocker l(_imageLock);
-  if (_image)
+  // if a preferredFrameSize is set, call the superclass to return that instead of using the image size.
+  if (CGSizeEqualToSize(self.preferredFrameSize, CGSizeZero) == NO)
+    return [super calculateSizeThatFits:constrainedSize];
+  else if (_image)
     return _image.size;
   else
     return CGSizeZero;
@@ -107,10 +124,12 @@
 - (void)setImage:(UIImage *)image
 {
   ASDN::MutexLocker l(_imageLock);
-  if (_image != image) {
+  if (!ASObjectIsEqual(_image, image)) {
     _image = image;
-    ASDisplayNodePerformBlockOnMainThread(^{
-      [self invalidateCalculatedSize];
+
+    ASDN::MutexUnlocker u(_imageLock);
+    ASPerformBlockOnMainThread(^{
+      [self invalidateCalculatedLayout];
       [self setNeedsDisplay];
     });
   }
@@ -122,21 +141,12 @@
   return _image;
 }
 
-- (void)setTint:(ASImageNodeTint)tint
+- (void)setPlaceholderColor:(UIColor *)placeholderColor
 {
-  ASDN::MutexLocker l(_imageLock);
-  if (_tint != tint) {
-    _tint = tint;
-    ASDisplayNodePerformBlockOnMainThread(^{
-      [self setNeedsDisplay];
-    });
-  }
-}
+  _placeholderColor = placeholderColor;
 
-- (ASImageNodeTint)tint
-{
-  ASDN::MutexLocker l(_imageLock);
-  return _tint;
+  // prevent placeholders if we don't have a color
+  self.placeholderEnabled = placeholderColor != nil;
 }
 
 - (NSObject *)drawParametersForAsyncLayer:(_ASDisplayLayer *)layer;
@@ -149,7 +159,6 @@
                                                    bounds:(hasValidCropBounds ? _cropDisplayBounds : self.bounds)
                                             contentsScale:self.contentsScaleForDisplay
                                           backgroundColor:self.backgroundColor
-                                                     tint:self.tint
                                               contentMode:self.contentMode
                                                  cropRect:self.cropRect
                                    imageModificationBlock:self.imageModificationBlock];
@@ -165,23 +174,26 @@
 
   ASDisplayNodeAssert(parameters.contentsScale > 0, @"invalid contentsScale at display time");
 
+  // if the image is resizable, bail early since the image has likely already been configured
+  BOOL stretchable = !UIEdgeInsetsEqualToEdgeInsets(image.capInsets, UIEdgeInsetsZero);
+  if (stretchable) {
+    if (parameters.imageModificationBlock != NULL) {
+      image = parameters.imageModificationBlock(image);
+    }
+    return image;
+  }
+
   CGRect bounds = parameters.bounds;
 
   CGFloat contentsScale = parameters.contentsScale;
   UIViewContentMode contentMode = parameters.contentMode;
-  BOOL stretchable = !UIEdgeInsetsEqualToEdgeInsets(image.capInsets, UIEdgeInsetsZero);
   CGSize imageSize = image.size;
   CGSize imageSizeInPixels = CGSizeMake(imageSize.width * image.scale, imageSize.height * image.scale);
   CGSize boundsSizeInPixels = CGSizeMake(floorf(bounds.size.width * contentsScale), floorf(bounds.size.height * contentsScale));
 
-  CGImageAlphaInfo alphaInfo = CGImageGetAlphaInfo(image.CGImage);
-  BOOL imageHasAlpha =    alphaInfo == kCGImageAlphaFirst
-                       || alphaInfo == kCGImageAlphaLast
-                       || alphaInfo == kCGImageAlphaPremultipliedFirst
-                       || alphaInfo == kCGImageAlphaPremultipliedLast;
-
   BOOL contentModeSupported =    contentMode == UIViewContentModeScaleAspectFill
-                              || contentMode == UIViewContentModeScaleAspectFit;
+                              || contentMode == UIViewContentModeScaleAspectFit
+                              || contentMode == UIViewContentModeCenter;
 
   CGSize backingSize;
   CGRect imageDrawRect;
@@ -215,17 +227,15 @@
 
   // Use contentsScale of 1.0 and do the contentsScale handling in boundsSizeInPixels so ASCroppedImageBackingSizeAndDrawRectInBounds
   // will do its rounding on pixel instead of point boundaries
-  UIGraphicsBeginImageContextWithOptions(backingSize, !imageHasAlpha, 1.0);
-
-  CGContextRef context = UIGraphicsGetCurrentContext();
+  UIGraphicsBeginImageContextWithOptions(backingSize, parameters.opaque, 1.0);
+  
+  // if view is opaque, fill the context with background color
+  if (parameters.opaque && parameters.backgroundColor) {
+    [parameters.backgroundColor setFill];
+    UIRectFill({ .size = backingSize });
+  }
 
   [image drawInRect:imageDrawRect];
-
-  if (parameters.tint == ASImageNodeTintGreyscale) {
-    [[UIColor grayColor] setFill];
-    CGContextSetBlendMode(context, kCGBlendModeColor);
-    CGContextFillRect(context, (CGRect){.size = backingSize});
-  }
 
   if (isCancelled()) {
     UIGraphicsEndImageContext();
@@ -238,10 +248,6 @@
 
   if (parameters.imageModificationBlock != NULL) {
     result = parameters.imageModificationBlock(result);
-  }
-
-  if (stretchable) {
-    return [image resizableImageWithCapInsets:image.capInsets resizingMode:image.resizingMode];
   }
 
   return result;
@@ -263,7 +269,7 @@
 #pragma mark -
 - (void)setNeedsDisplayWithCompletion:(void (^)(BOOL canceled))displayCompletionBlock
 {
-  if (self.preventOrCancelDisplay) {
+  if (self.displaySuspended) {
     if (displayCompletionBlock)
       displayCompletionBlock(YES);
     return;
@@ -300,7 +306,7 @@
   // If we have an image to display, display it, respecting our recrop flag.
   if (self.image)
   {
-    ASDisplayNodePerformBlockOnMainThread(^{
+    ASPerformBlockOnMainThread(^{
       if (recropImmediately)
         [self displayImmediately];
       else
@@ -328,10 +334,60 @@
   BOOL isCroppingImage = ((boundsSize.width < imageSize.width) || (boundsSize.height < imageSize.height));
 
   // Re-display if we need to.
-  ASDisplayNodePerformBlockOnMainThread(^{
+  ASPerformBlockOnMainThread(^{
     if (self.nodeLoaded && self.contentMode == UIViewContentModeScaleAspectFill && isCroppingImage)
       [self setNeedsDisplay];
   });
 }
 
 @end
+
+
+#pragma mark - Extras
+extern asimagenode_modification_block_t ASImageNodeRoundBorderModificationBlock(CGFloat borderWidth, UIColor *borderColor)
+{
+  return ^(UIImage *originalImage) {
+    UIGraphicsBeginImageContextWithOptions(originalImage.size, NO, originalImage.scale);
+    UIBezierPath *roundOutline = [UIBezierPath bezierPathWithOvalInRect:(CGRect){CGPointZero, originalImage.size}];
+
+    // Make the image round
+    [roundOutline addClip];
+
+    // Draw the original image
+    [originalImage drawAtPoint:CGPointZero];
+
+    // Draw a border on top.
+    if (borderWidth > 0.0) {
+      [borderColor setStroke];
+      [roundOutline setLineWidth:borderWidth];
+      [roundOutline stroke];
+    }
+
+    UIImage *modifiedImage = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return modifiedImage;
+  };
+}
+
+extern asimagenode_modification_block_t ASImageNodeTintColorModificationBlock(UIColor *color)
+{
+  return ^(UIImage *originalImage) {
+    UIGraphicsBeginImageContextWithOptions(originalImage.size, NO, originalImage.scale);
+    
+    // Set color and render template
+    [color setFill];
+    UIImage *templateImage = [originalImage imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    [templateImage drawAtPoint:CGPointZero];
+    
+    UIImage *modifiedImage = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+
+    // if the original image was stretchy, keep it stretchy
+    if (!UIEdgeInsetsEqualToEdgeInsets(originalImage.capInsets, UIEdgeInsetsZero)) {
+      modifiedImage = [modifiedImage resizableImageWithCapInsets:originalImage.capInsets resizingMode:originalImage.resizingMode];
+    }
+
+    return modifiedImage;
+  };
+}
+

@@ -22,6 +22,7 @@
   CGColorRef backgroundColor;
   id contents;
   CGFloat alpha;
+  CGFloat cornerRadius;
   UIViewContentMode contentMode;
   CGPoint anchorPoint;
   CGPoint position;
@@ -36,7 +37,6 @@
   CGFloat borderWidth;
   CGColorRef borderColor;
   BOOL asyncTransactionContainer;
-  NSString *name;
   BOOL isAccessibilityElement;
   NSString *accessibilityLabel;
   NSString *accessibilityHint;
@@ -47,6 +47,7 @@
   BOOL accessibilityElementsHidden;
   BOOL accessibilityViewIsModal;
   BOOL shouldGroupAccessibilityChildren;
+  NSString *accessibilityIdentifier;
 
   struct {
     // Properties
@@ -61,9 +62,11 @@
     int setAutoresizingMask:1;
     int setBounds:1;
     int setBackgroundColor:1;
+    int setTintColor:1;
     int setContents:1;
     int setHidden:1;
     int setAlpha:1;
+    int setCornerRadius:1;
     int setContentMode:1;
     int setNeedsDisplay:1;
     int setAnchorPoint:1;
@@ -81,7 +84,6 @@
     int setBorderWidth:1;
     int setBorderColor:1;
     int setAsyncTransactionContainer:1;
-    int setName:1;
     int setAllowsEdgeAntialiasing:1;
     int setEdgeAntialiasingMask:1;
     int setIsAccessibilityElement:1;
@@ -94,6 +96,7 @@
     int setAccessibilityElementsHidden:1;
     int setAccessibilityViewIsModal:1;
     int setShouldGroupAccessibilityChildren:1;
+    int setAccessibilityIdentifier:1;
   } _flags;
 }
 
@@ -109,7 +112,9 @@
 @synthesize edgeAntialiasingMask=edgeAntialiasingMask;
 @synthesize autoresizesSubviews=autoresizesSubviews;
 @synthesize autoresizingMask=autoresizingMask;
+@synthesize tintColor=tintColor;
 @synthesize alpha=alpha;
+@synthesize cornerRadius=cornerRadius;
 @synthesize contentMode=contentMode;
 @synthesize anchorPoint=anchorPoint;
 @synthesize position=position;
@@ -126,7 +131,6 @@
 @synthesize borderWidth=borderWidth;
 @synthesize borderColor=borderColor;
 @synthesize asyncdisplaykit_asyncTransactionContainer=asyncTransactionContainer;
-@synthesize asyncdisplaykit_name=name;
 
 - (id)init
 {
@@ -148,11 +152,13 @@
   opaque = YES;
   bounds = CGRectZero;
   backgroundColor = nil;
+  tintColor = [UIColor colorWithRed:0.0 green:0.478 blue:1.0 alpha:1.0];
   contents = nil;
   isHidden = NO;
   needsDisplayOnBoundsChange = NO;
   autoresizesSubviews = YES;
   alpha = 1.0f;
+  cornerRadius = 0.0f;
   contentMode = UIViewContentModeScaleToFill;
   _flags.needsDisplay = NO;
   anchorPoint = CGPointMake(0.5, 0.5);
@@ -180,6 +186,7 @@
   accessibilityElementsHidden = NO;
   accessibilityViewIsModal = NO;
   shouldGroupAccessibilityChildren = NO;
+  accessibilityIdentifier = nil;
   edgeAntialiasingMask = (kCALayerLeftEdge | kCALayerRightEdge | kCALayerTopEdge | kCALayerBottomEdge);
 
   return self;
@@ -265,6 +272,12 @@
   _flags.setBackgroundColor = YES;
 }
 
+- (void)setTintColor:(UIColor *)newTintColor
+{
+  tintColor = newTintColor;
+  _flags.setTintColor = YES;
+}
+
 - (void)setContents:(id)newContents
 {
   if (contents == newContents) {
@@ -285,6 +298,12 @@
 {
   alpha = newAlpha;
   _flags.setAlpha = YES;
+}
+
+- (void)setCornerRadius:(CGFloat)newCornerRadius
+{
+  cornerRadius = newCornerRadius;
+  _flags.setCornerRadius = YES;
 }
 
 - (void)setContentMode:(UIViewContentMode)newContentMode
@@ -395,20 +414,6 @@
 {
   asyncTransactionContainer = flag;
   _flags.setAsyncTransactionContainer = YES;
-}
-
-// This is named this way, since I'm not sure we can change the setter for the CA version
-- (void)setAsyncdisplaykit_name:(NSString *)newName
-{
-  _flags.setName = YES;
-  if (name != newName) {
-    name = [newName copy];
-  }
-}
-
-- (NSString *)asyncdisplaykit_name
-{
-  return name;
 }
 
 - (BOOL)isAccessibilityElement
@@ -523,6 +528,19 @@
   _flags.setShouldGroupAccessibilityChildren = YES;
 }
 
+- (NSString *)accessibilityIdentifier
+{
+  return accessibilityIdentifier;
+}
+
+- (void)setAccessibilityIdentifier:(NSString *)newAccessibilityIdentifier
+{
+  _flags.setAccessibilityIdentifier = YES;
+  if (accessibilityIdentifier != newAccessibilityIdentifier) {
+    accessibilityIdentifier = [newAccessibilityIdentifier copy];
+  }
+}
+
 - (void)applyToLayer:(CALayer *)layer
 {
   if (_flags.setAnchorPoint)
@@ -564,6 +582,9 @@
   if (_flags.setAlpha)
     layer.opacity = alpha;
 
+  if (_flags.setCornerRadius)
+    layer.cornerRadius = cornerRadius;
+
   if (_flags.setContentMode)
     layer.contentsGravity = ASDisplayNodeCAContentsGravityFromUIContentMode(contentMode);
 
@@ -602,9 +623,6 @@
 
   if (_flags.setAsyncTransactionContainer)
     layer.asyncdisplaykit_asyncTransactionContainer = asyncTransactionContainer;
-
-  if (_flags.setName)
-    layer.asyncdisplaykit_name = name;
 
   if (_flags.setOpaque)
     ASDisplayNodeAssert(layer.opaque == opaque, @"Didn't set opaque as desired");
@@ -652,6 +670,9 @@
   if (_flags.setBackgroundColor)
     layer.backgroundColor = backgroundColor;
 
+  if (_flags.setTintColor)
+    view.tintColor = self.tintColor;
+
   if (_flags.setOpaque)
     view.layer.opaque = opaque;
 
@@ -660,6 +681,9 @@
 
   if (_flags.setAlpha)
     view.alpha = alpha;
+
+  if (_flags.setCornerRadius)
+    layer.cornerRadius = cornerRadius;
 
   if (_flags.setContentMode)
     view.contentMode = contentMode;
@@ -712,9 +736,6 @@
   if (_flags.setAsyncTransactionContainer)
     view.asyncdisplaykit_asyncTransactionContainer = asyncTransactionContainer;
 
-  if (_flags.setName)
-    layer.asyncdisplaykit_name = name;
-
   if (_flags.setOpaque)
     ASDisplayNodeAssert(view.layer.opaque == opaque, @"Didn't set opaque as desired");
 
@@ -747,6 +768,224 @@
 
   if (_flags.setShouldGroupAccessibilityChildren)
     view.shouldGroupAccessibilityChildren = shouldGroupAccessibilityChildren;
+
+  if (_flags.setAccessibilityIdentifier)
+    view.accessibilityIdentifier = accessibilityIdentifier;
+}
+
++ (_ASPendingState *)pendingViewStateFromLayer:(CALayer *)layer
+{
+  _ASPendingState *pendingState = [[_ASPendingState alloc] init];
+  
+  pendingState.anchorPoint = layer.anchorPoint;
+  (pendingState->_flags).setAnchorPoint = YES;
+  
+  pendingState.position = layer.position;
+  (pendingState->_flags).setPosition = YES;
+  
+  pendingState.zPosition = layer.zPosition;
+  (pendingState->_flags).setZPosition = YES;
+  
+  pendingState.bounds = layer.bounds;
+  (pendingState->_flags).setBounds = YES;
+  
+  pendingState.contentsScale = layer.contentsScale;
+  (pendingState->_flags).setContentsScale = YES;
+  
+  pendingState.transform = layer.transform;
+  (pendingState->_flags).setTransform = YES;
+  
+  pendingState.sublayerTransform = layer.sublayerTransform;
+  (pendingState->_flags).setSublayerTransform = YES;
+  
+  pendingState.contents = layer.contents;
+  (pendingState->_flags).setContents = YES;
+  
+  pendingState.clipsToBounds = layer.masksToBounds;
+  (pendingState->_flags).setClipsToBounds = YES;
+  
+  pendingState.backgroundColor = layer.backgroundColor;
+  (pendingState->_flags).setBackgroundColor = YES;
+  
+  pendingState.opaque = layer.opaque;
+  (pendingState->_flags).setOpaque = YES;
+  
+  pendingState.hidden = layer.hidden;
+  (pendingState->_flags).setHidden = YES;
+  
+  pendingState.alpha = layer.opacity;
+  (pendingState->_flags).setAlpha = YES;
+  
+  pendingState.cornerRadius = layer.cornerRadius;
+  (pendingState->_flags).setCornerRadius = YES;
+  
+  pendingState.contentMode = ASDisplayNodeUIContentModeFromCAContentsGravity(layer.contentsGravity);
+  (pendingState->_flags).setContentMode = YES;
+  
+  pendingState.shadowColor = layer.shadowColor;
+  (pendingState->_flags).setShadowColor = YES;
+  
+  pendingState.shadowOpacity = layer.shadowOpacity;
+  (pendingState->_flags).setShadowOpacity = YES;
+  
+  pendingState.shadowOffset = layer.shadowOffset;
+  (pendingState->_flags).setShadowOffset = YES;
+  
+  pendingState.shadowRadius = layer.shadowRadius;
+  (pendingState->_flags).setShadowRadius = YES;
+  
+  pendingState.borderWidth = layer.borderWidth;
+  (pendingState->_flags).setBorderWidth = YES;
+  
+  pendingState.borderColor = layer.borderColor;
+  (pendingState->_flags).setBorderColor = YES;
+  
+  pendingState.needsDisplayOnBoundsChange = layer.needsDisplayOnBoundsChange;
+  (pendingState->_flags).setNeedsDisplayOnBoundsChange = YES;
+  
+  pendingState.allowsEdgeAntialiasing = layer.allowsEdgeAntialiasing;
+  (pendingState->_flags).setAllowsEdgeAntialiasing = YES;
+  
+  pendingState.edgeAntialiasingMask = layer.edgeAntialiasingMask;
+  (pendingState->_flags).setEdgeAntialiasingMask = YES;
+  
+  return pendingState;
+}
+
++ (_ASPendingState *)pendingViewStateFromView:(UIView *)view
+{
+  _ASPendingState *pendingState = [[_ASPendingState alloc] init];
+  
+  CALayer *layer = view.layer;
+  
+  pendingState.anchorPoint = layer.anchorPoint;
+  (pendingState->_flags).setAnchorPoint = YES;
+  
+  pendingState.position = layer.position;
+  (pendingState->_flags).setPosition = YES;
+  
+  pendingState.zPosition = layer.zPosition;
+  (pendingState->_flags).setZPosition = YES;
+  
+  pendingState.bounds = view.bounds;
+  (pendingState->_flags).setBounds = YES;
+  
+  pendingState.contentsScale = layer.contentsScale;
+  (pendingState->_flags).setContentsScale = YES;
+  
+  pendingState.transform = layer.transform;
+  (pendingState->_flags).setTransform = YES;
+  
+  pendingState.sublayerTransform = layer.sublayerTransform;
+  (pendingState->_flags).setSublayerTransform = YES;
+  
+  pendingState.contents = layer.contents;
+  (pendingState->_flags).setContents = YES;
+  
+  pendingState.clipsToBounds = view.clipsToBounds;
+  (pendingState->_flags).setClipsToBounds = YES;
+  
+  pendingState.backgroundColor = layer.backgroundColor;
+  (pendingState->_flags).setBackgroundColor = YES;
+  
+  pendingState.tintColor = view.tintColor;
+  (pendingState->_flags).setTintColor = YES;
+  
+  pendingState.opaque = layer.opaque;
+  (pendingState->_flags).setOpaque = YES;
+  
+  pendingState.hidden = view.hidden;
+  (pendingState->_flags).setHidden = YES;
+  
+  pendingState.alpha = view.alpha;
+  (pendingState->_flags).setAlpha = YES;
+  
+  pendingState.cornerRadius = layer.cornerRadius;
+  (pendingState->_flags).setCornerRadius = YES;
+  
+  pendingState.contentMode = view.contentMode;
+  (pendingState->_flags).setContentMode = YES;
+  
+  pendingState.userInteractionEnabled = view.userInteractionEnabled;
+  (pendingState->_flags).setUserInteractionEnabled = YES;
+  
+  pendingState.exclusiveTouch = view.exclusiveTouch;
+  (pendingState->_flags).setExclusiveTouch = YES;
+  
+  pendingState.shadowColor = layer.shadowColor;
+  (pendingState->_flags).setShadowColor = YES;
+  
+  pendingState.shadowOpacity = layer.shadowOpacity;
+  (pendingState->_flags).setShadowOpacity = YES;
+  
+  pendingState.shadowOffset = layer.shadowOffset;
+  (pendingState->_flags).setShadowOffset = YES;
+  
+  pendingState.shadowRadius = layer.shadowRadius;
+  (pendingState->_flags).setShadowRadius = YES;
+  
+  pendingState.borderWidth = layer.borderWidth;
+  (pendingState->_flags).setBorderWidth = YES;
+  
+  pendingState.borderColor = layer.borderColor;
+  (pendingState->_flags).setBorderColor = YES;
+  
+  pendingState.autoresizingMask = view.autoresizingMask;
+  (pendingState->_flags).setAutoresizingMask = YES;
+  
+  pendingState.autoresizesSubviews = view.autoresizesSubviews;
+  (pendingState->_flags).setAutoresizesSubviews = YES;
+  
+  pendingState.needsDisplayOnBoundsChange = layer.needsDisplayOnBoundsChange;
+  (pendingState->_flags).setNeedsDisplayOnBoundsChange = YES;
+  
+  pendingState.allowsEdgeAntialiasing = layer.allowsEdgeAntialiasing;
+  (pendingState->_flags).setAllowsEdgeAntialiasing = YES;
+  
+  pendingState.edgeAntialiasingMask = layer.edgeAntialiasingMask;
+  (pendingState->_flags).setEdgeAntialiasingMask = YES;
+
+  pendingState.isAccessibilityElement = view.isAccessibilityElement;
+  (pendingState->_flags).setIsAccessibilityElement = YES;
+  
+  pendingState.accessibilityLabel = view.accessibilityLabel;
+  (pendingState->_flags).setAccessibilityLabel = YES;
+  
+  pendingState.accessibilityHint = view.accessibilityHint;
+  (pendingState->_flags).setAccessibilityHint = YES;
+  
+  pendingState.accessibilityValue = view.accessibilityValue;
+  (pendingState->_flags).setAccessibilityValue = YES;
+  
+  pendingState.accessibilityTraits = view.accessibilityTraits;
+  (pendingState->_flags).setAccessibilityTraits = YES;
+  
+  pendingState.accessibilityFrame = view.accessibilityFrame;
+  (pendingState->_flags).setAccessibilityFrame = YES;
+  
+  pendingState.accessibilityLanguage = view.accessibilityLanguage;
+  (pendingState->_flags).setAccessibilityLanguage = YES;
+  
+  pendingState.accessibilityElementsHidden = view.accessibilityElementsHidden;
+  (pendingState->_flags).setAccessibilityElementsHidden = YES;
+  
+  pendingState.accessibilityViewIsModal = view.accessibilityViewIsModal;
+  (pendingState->_flags).setAccessibilityViewIsModal = YES;
+  
+  pendingState.shouldGroupAccessibilityChildren = view.shouldGroupAccessibilityChildren;
+  (pendingState->_flags).setShouldGroupAccessibilityChildren = YES;
+  
+  pendingState.accessibilityIdentifier = view.accessibilityIdentifier;
+  (pendingState->_flags).setAccessibilityIdentifier = YES;
+  
+  return pendingState;
+}
+
+- (void)dealloc
+{
+  CGColorRelease(backgroundColor);
+  CGColorRelease(shadowColor);
+  CGColorRelease(borderColor);
 }
 
 @end

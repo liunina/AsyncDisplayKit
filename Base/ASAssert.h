@@ -28,6 +28,7 @@
 
 #define ASDisplayNodeAssertImplementedBySubclass() ASDisplayNodeAssertWithSignal(NO, nil, @"This method must be implemented by subclass %@", [self class]);
 #define ASDisplayNodeAssertNotInstantiable() ASDisplayNodeAssertWithSignal(NO, nil, @"This class is not instantiable.");
+#define ASDisplayNodeAssertNotSupported() ASDisplayNodeAssertWithSignal(NO, nil, @"This method is not supported by class %@", [self class]);
 
 #define ASDisplayNodeAssertMainThread() ASDisplayNodeAssertWithSignal([NSThread isMainThread], nil, @"This method must be called on the main thread")
 #define ASDisplayNodeCAssertMainThread() ASDisplayNodeCAssertWithSignal([NSThread isMainThread], nil, @"This function must be called on the main thread")
@@ -46,3 +47,10 @@
 
 #define ASDisplayNodeFailAssert(description, ...) ASDisplayNodeAssertWithSignal(NO, nil, (description), ##__VA_ARGS__)
 #define ASDisplayNodeCFailAssert(description, ...) ASDisplayNodeCAssertWithSignal(NO, nil, (description), ##__VA_ARGS__)
+
+#define ASDisplayNodeConditionalAssert(shouldTestCondition, condition, description, ...) ASDisplayNodeAssert((!(shouldTestCondition) || (condition)), nil, (description), ##__VA_ARGS__)
+#define ASDisplayNodeConditionalCAssert(shouldTestCondition, condition, description, ...) ASDisplayNodeCAssert((!(shouldTestCondition) || (condition)), nil, (description), ##__VA_ARGS__)
+
+#define ASDisplayNodeCAssertPositiveReal(description, num) ASDisplayNodeCAssert(num >= 0 && num <= CGFLOAT_MAX, @"%@ must be a real positive integer.", description)
+#define ASDisplayNodeCAssertInfOrPositiveReal(description, num) ASDisplayNodeCAssert(isinf(num) || (num >= 0 && num <= CGFLOAT_MAX), @"%@ must be infinite or a real positive integer.", description)
+

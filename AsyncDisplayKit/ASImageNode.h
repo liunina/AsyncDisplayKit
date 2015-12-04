@@ -8,27 +8,16 @@
 
 #import <AsyncDisplayKit/ASControlNode.h>
 
-/**
- * Image tints.
- */
-typedef NS_ENUM(NSUInteger, ASImageNodeTint) {
-  /**
-   * No tint.
-   */
-  ASImageNodeTintNormal = 0,
-
-  /**
-   * Display the image in greyscale.
-   */
-  ASImageNodeTintGreyscale,
-};
 
 /**
  * Image modification block.  Use to transform an image before display.
  *
  * @param image The image to be displayed.
+ *
+ * @returns A transformed image.
  */
 typedef UIImage *(^asimagenode_modification_block_t)(UIImage *image);
+
 
 /**
  * @abstract Draws images.
@@ -46,11 +35,9 @@ typedef UIImage *(^asimagenode_modification_block_t)(UIImage *image);
 @property (atomic, retain) UIImage *image;
 
 /**
- * @abstract Simple way to tint the image.
+ @abstract The placeholder color.
  */
-@property (nonatomic, assign) ASImageNodeTint tint;
-
-#pragma mark - Cropping
+@property (nonatomic, strong) UIColor *placeholderColor;
 
 /**
  * @abstract Indicates whether efficient cropping of the receiver is enabled.
@@ -100,19 +87,47 @@ typedef UIImage *(^asimagenode_modification_block_t)(UIImage *image);
  */
 @property (nonatomic, readwrite, copy) asimagenode_modification_block_t imageModificationBlock;
 
-#pragma mark -
 /**
  * @abstract Marks the receiver as needing display and performs a block after
  * display has finished.
  *
  * @param displayCompletionBlock The block to be performed after display has
  * finished.  Its `canceled` property will be YES if display was prevented or
- * canceled (via preventOrCancelDisplay); NO otherwise.
+ * canceled (via displaySuspended); NO otherwise.
  * 
  * @discussion displayCompletionBlock will be performed on the main-thread. If
- * `preventOrCancelDisplay` is YES, `displayCompletionBlock` is will be
+ * `displaySuspended` is YES, `displayCompletionBlock` is will be
  * performed immediately and `YES` will be passed for `canceled`.
  */
 - (void)setNeedsDisplayWithCompletion:(void (^)(BOOL canceled))displayCompletionBlock;
 
 @end
+
+
+ASDISPLAYNODE_EXTERN_C_BEGIN
+
+/**
+ * @abstract Image modification block that rounds (and optionally adds a border to) an image.
+ *
+ * @param borderWidth The width of the round border to draw, or zero if no border is desired.
+ * @param borderColor What colour border to draw.
+ *
+ * @see <imageModificationBlock>
+ *
+ * @returns An ASImageNode image modification block.
+ */
+asimagenode_modification_block_t ASImageNodeRoundBorderModificationBlock(CGFloat borderWidth, UIColor *borderColor);
+
+/**
+ * @abstract Image modification block that applies a tint color à la UIImage configured with
+ * renderingMode set to UIImageRenderingModeAlwaysTemplate.
+ *
+ * @param tintColor The color to tint the image.
+ *
+ * @see <imageModificationBlock>
+ *
+ * @returns An ASImageNode image modification block.
+ */
+asimagenode_modification_block_t ASImageNodeTintColorModificationBlock(UIColor *color);
+
+ASDISPLAYNODE_EXTERN_C_END

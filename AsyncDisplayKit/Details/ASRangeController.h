@@ -9,86 +9,48 @@
 #import <Foundation/Foundation.h>
 
 #import <AsyncDisplayKit/ASCellNode.h>
+#import <AsyncDisplayKit/ASDataController.h>
+#import <AsyncDisplayKit/ASFlowLayoutController.h>
+#import <AsyncDisplayKit/ASLayoutController.h>
 
-typedef struct {
-  // working range buffers, on either side of scroll
-  NSInteger trailingBufferScreenfuls;
-  NSInteger leadingBufferScreenfuls;
-} ASRangeTuningParameters;
 
 @protocol ASRangeControllerDelegate;
-
 
 /**
  * Working range controller.
  *
- * Used internally by ASTableView and potentially by a future ASCollectionView.  Observes the visible range, maintains
- * a working range, and is responsible for handling AsyncDisplayKit machinery (sizing cell nodes, enqueueing and
- * cancelling their asynchronous layout and display, and so on).
+ * Used internally by ASTableView and ASCollectionView.  It is paired with ASDataController.
+ * It is designed to support custom scrolling containers as well.  Observes the visible range, maintains
+ * "working ranges" to trigger network calls and rendering, and is responsible for driving asynchronous layout of cells.
+ * This includes cancelling those asynchronous operations as cells fall outside of the working ranges.
  */
-@interface ASRangeController : ASDealloc2MainObject
+@interface ASRangeController : ASDealloc2MainObject <ASDataControllerDelegate>
 
 /**
- * Notify the receiver that its delegate's data source has been set or changed.  This is like -[UITableView reloadData]
- * but drastically more expensive, as it destroys the working range and all cached nodes.
- */
-- (void)rebuildData;
-
-/**
- * Notify the receiver that the visible range has been updated.
+ * Notify the range controller that the visible range has been updated.
+ * This is the primary input call that drives updating the working ranges, and triggering their actions.
+ *
+ * @param scrollDirection The current scroll direction of the scroll view.
  *
  * @see [ASRangeControllerDelegate rangeControllerVisibleNodeIndexPaths:]
  */
-- (void)visibleNodeIndexPathsDidChange;
-
-/**
- * ASTableView is only aware of nodes that have already been sized.
- *
- * Custom ASCellNode implementations are encouraged to have "realistic placeholders", since they can only be onscreen if
- * they have enough data for layout.  E.g., try setting all subnodes' background colours to [UIColor lightGrayColor].
- */
-- (NSInteger)numberOfSizedSections;
-- (NSInteger)numberOfSizedRowsInSection:(NSInteger)section;
+- (void)visibleNodeIndexPathsDidChangeWithScrollDirection:(ASScrollDirection)scrollDirection;
 
 /**
  * Add the sized node for `indexPath` as a subview of `contentView`.
  *
  * @param contentView UIView to add a (sized) node's view to.
  *
- * @param indexPath Index path for the node to be added.
+ * @param cellNode The cell node to be added.
  */
-- (void)configureContentView:(UIView *)contentView forIndexPath:(NSIndexPath *)indexPath;
-
-/**
- * Query the sized node at `indexPath` for its calculatedSize.
- *
- * @param indexPath The index path for the node of interest.
- *
- * TODO:  Currently we disallow direct access to ASCellNode outside ASRangeController since touching the node's view can
- *        break async display.  We should expose the node anyway, possibly with an assertion guarding against external
- *        use of the view property, so ASCellNode can support configuration for UITableViewCell properties (selection
- *        style, separator style, etc.) and ASTableView can query that data.
- */
-- (CGSize)calculatedSizeForNodeAtIndexPath:(NSIndexPath *)indexPath;
-
-/**
- * Notify the receiver that its data source has been updated to append the specified nodes.
- *
- * @param indexPaths Array of NSIndexPaths for the newly-sized nodes.
- */
-- (void)appendNodesWithIndexPaths:(NSArray *)indexPaths;
+- (void)configureContentView:(UIView *)contentView forCellNode:(ASCellNode *)node;
 
 /**
  * Delegate and ultimate data source.  Must not be nil.
  */
 @property (nonatomic, weak) id<ASRangeControllerDelegate> delegate;
 
-/**
- * Tuning parameters for the working range.
- *
- * Defaults to a trailing buffer of one screenful and a leading buffer of two screenfuls.
- */
-@property (nonatomic, assign) ASRangeTuningParameters tuningParameters;
+@property (nonatomic, strong) id<ASLayoutController> layoutController;
 
 @end
 
@@ -113,52 +75,76 @@ typedef struct {
 - (CGSize)rangeControllerViewportSize:(ASRangeController *)rangeController;
 
 /**
+ * Begin updates.
+ *
  * @param rangeController Sender.
- *
- * @returns The number of total sections.
- *
- * @discussion <ASTableView> forwards this method to its data source.
  */
-- (NSInteger)rangeControllerSections:(ASRangeController *)rangeController;
+- (void)rangeControllerBeginUpdates:(ASRangeController *)rangeController;
 
 /**
+ * End updates.
+ *
  * @param rangeController Sender.
- *
- * @param section Section.
- *
- * @returns The number of rows in `section`.
- *
- * @discussion <ASTableView> forwards this method to its data source.
+ * @param animated NO if all animations are disabled. YES otherwise.
+ * @param completion Completion block.
  */
-- (NSInteger)rangeController:(ASRangeController *)rangeController rowsInSection:(NSInteger)section;
+- (void)rangeController:(ASRangeController * )rangeController endUpdatesAnimated:(BOOL)animated completion:(void (^)(BOOL))completion;
 
 /**
+ * Fetch nodes at specific index paths.
+ *
  * @param rangeController Sender.
  *
- * @param indexPath Index path for the node of interest.
- * 
- * @returns A new <ASCellNode> corresponding to `indexPath`.
- *
- * @discussion <ASTableView> forwards this method to its data source.
+ * @param indexPaths Index paths.
  */
-- (ASCellNode *)rangeController:(ASRangeController *)rangeController nodeForIndexPath:(NSIndexPath *)indexPath;
+- (NSArray *)rangeController:(ASRangeController *)rangeController nodesAtIndexPaths:(NSArray *)indexPaths;
 
 /**
+ * Called for nodes insertion.
+ *
  * @param rangeController Sender.
  *
- * @param indexPath Node to be sized.
+ * @param nodes Inserted nodes.
  *
- * @returns Sizing constraints for the node at `indexPath`, to be used as an argument to <[ASDisplayNode measure:]>.
+ * @param indexPaths Index path of inserted nodes.
+ *
+ * @param animationOptions Animation options. See ASDataControllerAnimationOptions.
  */
-- (CGSize)rangeController:(ASRangeController *)rangeController constrainedSizeForNodeAtIndexPath:(NSIndexPath *)indexPath;
+- (void)rangeController:(ASRangeController *)rangeController didInsertNodes:(NSArray *)nodes atIndexPaths:(NSArray *)indexPaths withAnimationOptions:(ASDataControllerAnimationOptions)animationOptions;
 
 /**
- * Notifies the receiver that the specified nodes have been sized and are ready for display.
+ * Called for nodes deletion.
  *
  * @param rangeController Sender.
  *
- * @param indexPaths Array of NSIndexPaths for the newly-sized nodes.
+ * @param nodes Deleted nodes.
+ *
+ * @param indexPaths Index path of deleted nodes.
+ *
+ * @param animationOptions Animation options. See ASDataControllerAnimationOptions.
  */
-- (void)rangeController:(ASRangeController *)rangeController didSizeNodesWithIndexPaths:(NSArray *)indexPaths;
+- (void)rangeController:(ASRangeController *)rangeController didDeleteNodes:(NSArray *)nodes atIndexPaths:(NSArray *)indexPaths withAnimationOptions:(ASDataControllerAnimationOptions)animationOptions;
+
+/**
+ * Called for section insertion.
+ *
+ * @param rangeController Sender.
+ *
+ * @param indexSet Index set of inserted sections.
+ *
+ * @param animationOptions Animation options. See ASDataControllerAnimationOptions.
+ */
+- (void)rangeController:(ASRangeController *)rangeController didInsertSectionsAtIndexSet:(NSIndexSet *)indexSet withAnimationOptions:(ASDataControllerAnimationOptions)animationOptions;
+
+/**
+ * Called for section deletion.
+ *
+ * @param rangeController Sender.
+ *
+ * @param indexSet Index set of deleted sections.
+ *
+ * @param animationOptions Animation options. See ASDataControllerAnimationOptions.
+ */
+- (void)rangeController:(ASRangeController *)rangeController didDeleteSectionsAtIndexSet:(NSIndexSet *)indexSet withAnimationOptions:(ASDataControllerAnimationOptions)animationOptions;
 
 @end

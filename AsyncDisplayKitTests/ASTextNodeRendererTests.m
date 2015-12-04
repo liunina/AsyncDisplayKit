@@ -18,9 +18,11 @@
 @property (nonatomic, copy, readwrite) NSAttributedString *attributedString;
 @property (nonatomic, copy, readwrite) NSAttributedString *truncationString;
 @property (nonatomic, readwrite, assign) NSLineBreakMode truncationMode;
+@property (nonatomic, readwrite, assign) NSUInteger maximumLineCount;
 @property (nonatomic, readwrite, assign) CGFloat lineSpacing;
 
 @property (nonatomic, readwrite, assign) CGSize constrainedSize;
+@property (nonatomic, readwrite) NSArray *exclusionPaths;
 
 @end
 
@@ -42,6 +44,8 @@
   _attributedString = [[NSAttributedString alloc] initWithString:@"Lorem ipsum" attributes:attributes];
   _truncationString = [[NSAttributedString alloc] initWithString:@"More"];
 
+  _exclusionPaths = nil;
+
   _constrainedSize = CGSizeMake(FLT_MAX, FLT_MAX);
 }
 
@@ -50,6 +54,8 @@
   _renderer = [[ASTextNodeRenderer alloc] initWithAttributedString:_attributedString
                                                       truncationString:_truncationString
                                                         truncationMode:_truncationMode
+                                                      maximumLineCount:_maximumLineCount
+                                                        exclusionPaths:_exclusionPaths
                                                        constrainedSize:_constrainedSize];
 
 }
@@ -63,12 +69,41 @@
   XCTAssertTrue(size.height > 0, @"Should have a nonzero height");
 }
 
+- (void)testCalculateSizeWithEmptyString
+{
+    _attributedString = [[NSAttributedString alloc] initWithString:@""];
+    [self setUpRenderer];
+    CGSize size = [_renderer size];
+    XCTAssertTrue(CGSizeEqualToSize(CGSizeZero, size), @"Empty NSAttributedString should result in CGSizeZero");
+}
+
+- (void)testCalculateSizeWithNilString
+{
+    _attributedString = nil;
+    [self setUpRenderer];
+    CGSize size = [_renderer size];
+    XCTAssertTrue(CGSizeEqualToSize(CGSizeZero, size), @"Nil NSAttributedString should result in CGSizeZero");
+}
+
 - (void)testNumberOfLines
 {
   [self setUpRenderer];
   CGSize size = [_renderer size];
   NSInteger numberOfLines = size.height / _lineSpacing;
   XCTAssertTrue(numberOfLines == 1 , @"If constrained height (%f) is float max, then there should only be one line of text. Size %@", _constrainedSize.width, NSStringFromCGSize(size));
+}
+
+- (void)testMaximumLineCount
+{
+    NSArray *lines = [NSArray arrayWithObjects:@"Hello!", @"world!", @"foo", @"bar", @"baz", nil];
+    _maximumLineCount = 2;
+    for (int i = 0; i <= [lines count]; i++) {
+        NSString *line = [[lines subarrayWithRange:NSMakeRange(0, i)] componentsJoinedByString:@"\n"];
+        _attributedString   = [[NSAttributedString alloc] initWithString:line];
+        [self setUpRenderer];
+        [_renderer size];
+        XCTAssertTrue(_renderer.lineCount <= _maximumLineCount, @"The line count %tu after rendering should be no larger than the maximum line count %tu", _renderer.lineCount, _maximumLineCount);
+    }
 }
 
 - (void)testNoTruncationIfEnoughSpace
@@ -113,7 +148,7 @@
   [self setUpRenderer];
   CGSize calculatedSizeWithTruncation = [_renderer size];
   // Floating point equality
-  XCTAssertTrue(fabsf(calculatedSizeWithTruncation.height - calculatedSize.height) < .001, @"The height after truncation (%f) doesn't match the normal calculated height (%f)", calculatedSizeWithTruncation.height, calculatedSize.height);
+  XCTAssertTrue(fabs(calculatedSizeWithTruncation.height - calculatedSize.height) < .001, @"The height after truncation (%f) doesn't match the normal calculated height (%f)", calculatedSizeWithTruncation.height, calculatedSize.height);
 }
 
 - (void)testNoCrashOnTappingEmptyTextNode
@@ -124,7 +159,20 @@
   [_renderer enumerateTextIndexesAtPosition:CGPointZero usingBlock:^(NSUInteger characterIndex, CGRect glyphBoundingRect, BOOL *stop) {
     XCTFail(@"Shouldn't be any text indexes to enumerate");
   }];
+}
 
+- (void)testExclusionPaths
+{
+  _constrainedSize = CGSizeMake(200, CGFLOAT_MAX);
+  [self setUpRenderer];
+  CGSize sizeWithoutExclusionPath = [_renderer size];
+
+  CGRect exclusionRect = CGRectMake(20, 0, 180, _lineSpacing * 2.0);
+  _exclusionPaths = @[[UIBezierPath bezierPathWithRect:exclusionRect]];
+  [self setUpRenderer];
+  CGSize sizeWithExclusionPath = [_renderer size];
+
+  XCTAssertEqualWithAccuracy(sizeWithoutExclusionPath.height + exclusionRect.size.height, sizeWithExclusionPath.height, 0.5, @"Using an exclusion path so the the text can not fit into the first two lines should increment the size of the text by the heigth of the exclusion path");
 }
 
 @end

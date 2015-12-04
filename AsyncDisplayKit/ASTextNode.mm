@@ -11,12 +11,16 @@
 #import <AsyncDisplayKit/_ASDisplayLayer.h>
 #import <AsyncDisplayKit/ASAssert.h>
 #import <AsyncDisplayKit/ASDisplayNode+Subclasses.h>
+#import <AsyncDisplayKit/ASDisplayNodeInternal.h>
 #import <AsyncDisplayKit/ASHighlightOverlayLayer.h>
 #import <AsyncDisplayKit/ASTextNodeCoreTextAdditions.h>
 #import <AsyncDisplayKit/ASTextNodeTextKitHelpers.h>
+#import <AsyncDisplayKit/ASDisplayNodeExtras.h>
 
+#import "ASInternalHelpers.h"
 #import "ASTextNodeRenderer.h"
 #import "ASTextNodeShadower.h"
+#import "ASEqualityHelpers.h"
 
 static const NSTimeInterval ASTextNodeHighlightFadeOutDuration = 0.15;
 static const NSTimeInterval ASTextNodeHighlightFadeInDuration = 0.1;
@@ -64,18 +68,6 @@ static NSString *ASTextNodeTruncationTokenAttributeName = @"ASTextNodeTruncation
 
 @end
 
-ASDISPLAYNODE_INLINE CGFloat ceilPixelValueForScale(CGFloat f, CGFloat scale)
-{
-  // Round up to device pixel (.5 on retina)
-  return ceilf(f * scale) / scale;
-}
-
-ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
-{
-  return ceilPixelValueForScale(f, [UIScreen mainScreen].scale);
-}
-
-
 @interface ASTextNode () <UIGestureRecognizerDelegate>
 
 @end
@@ -85,6 +77,8 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   CGColorRef _shadowColor;
   CGFloat _shadowOpacity;
   CGFloat _shadowRadius;
+
+  NSArray *_exclusionPaths;
 
   NSAttributedString *_composedTruncationString;
 
@@ -102,6 +96,7 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
 
   UILongPressGestureRecognizer *_longPressGestureRecognizer;
 }
+@dynamic placeholderEnabled;
 
 #pragma mark - NSObject
 
@@ -122,7 +117,7 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
     self.needsDisplayOnBoundsChange = YES;
 
     _truncationMode = NSLineBreakByWordWrapping;
-    _truncationAttributedString = [[NSAttributedString alloc] initWithString:NSLocalizedString(@"\u2026", @"Default truncation string")];
+    _truncationAttributedString = DefaultTruncationAttributedString();
 
     // The common case is for a text node to be non-opaque and blended over some background.
     self.opaque = NO;
@@ -135,9 +130,27 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
     self.accessibilityTraits = UIAccessibilityTraitStaticText;
 
     _constrainedSize = CGSizeMake(-INFINITY, -INFINITY);
+
+    // Placeholders
+    // Disabled by default in ASDisplayNode, but add a few options for those who toggle
+    // on the special placeholder behavior of ASTextNode.
+    _placeholderColor = ASDisplayNodeDefaultPlaceholderColor();
+    _placeholderInsets = UIEdgeInsetsMake(1.0, 0.0, 1.0, 0.0);
   }
 
   return self;
+}
+
+- (instancetype)initWithLayerBlock:(ASDisplayNodeLayerBlock)viewBlock didLoadBlock:(ASDisplayNodeDidLoadBlock)didLoadBlock
+{
+  ASDisplayNodeAssertNotSupported();
+  return nil;
+}
+
+- (instancetype)initWithViewBlock:(ASDisplayNodeViewBlock)viewBlock didLoadBlock:(ASDisplayNodeDidLoadBlock)didLoadBlock
+{
+  ASDisplayNodeAssertNotSupported();
+  return nil;
 }
 
 - (void)dealloc
@@ -182,16 +195,18 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
 
   _constrainedSize = constrainedSizeForText;
   [self _invalidateRenderer];
-  [self setNeedsDisplay];
+  ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+    [self setNeedsDisplay];
+  });
   CGSize rendererSize = [[self _renderer] size];
 
   // Add shadow padding back
   CGSize renderSizePlusShadowPadding = UIEdgeInsetsInsetRect(CGRect{CGPointZero, rendererSize}, shadowPadding).size;
   ASDisplayNodeAssert(renderSizePlusShadowPadding.width >= 0, @"Calculated width for text with shadow padding (%f) is too  narrow", constrainedSizeForText.width);
   ASDisplayNodeAssert(renderSizePlusShadowPadding.height >= 0, @"Calculated height for text with shadow padding (%f) is too short", constrainedSizeForText.height);
-
-  return CGSizeMake(fminf(ceilPixelValue(renderSizePlusShadowPadding.width), constrainedSize.width),
-                    fminf(ceilPixelValue(renderSizePlusShadowPadding.height), constrainedSize.height));
+  renderSizePlusShadowPadding = ceilSizeValue(renderSizePlusShadowPadding);
+  return CGSizeMake(MIN(renderSizePlusShadowPadding.width, constrainedSize.width),
+                    MIN(renderSizePlusShadowPadding.height, constrainedSize.height));
 }
 
 - (void)displayDidFinish
@@ -206,12 +221,12 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   [self _invalidateRenderer];
 }
 
-- (void)reclaimMemory
+- (void)clearContents
 {
   // We discard the backing store and renderer to prevent the very large
   // memory overhead of maintaining these for all text nodes.  They can be
   // regenerated when layout is necessary.
-  [super reclaimMemory];      // ASDisplayNode will set layer.contents = nil
+  [super clearContents];      // ASDisplayNode will set layer.contents = nil
   [self _invalidateRenderer];
 }
 
@@ -222,8 +237,33 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   // If we are view-backed, support gesture interaction.
   if (!self.isLayerBacked) {
     _longPressGestureRecognizer = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(_handleLongPress:)];
+    _longPressGestureRecognizer.cancelsTouchesInView = self.longPressCancelsTouches;
     _longPressGestureRecognizer.delegate = self;
     [self.view addGestureRecognizer:_longPressGestureRecognizer];
+  }
+}
+
+- (void)setFrame:(CGRect)frame
+{
+  [super setFrame:frame];
+  if (!CGSizeEqualToSize(frame.size, _constrainedSize)) {
+    // Our bounds have changed to a size that is not identical to our constraining size,
+    // so our previous layout information is invalid, and TextKit may draw at the
+    // incorrect origin.
+    _constrainedSize = CGSizeMake(-INFINITY, -INFINITY);
+    [self _invalidateRenderer];
+  }
+}
+
+- (void)setBounds:(CGRect)bounds
+{
+  [super setBounds:bounds];
+  if (!CGSizeEqualToSize(bounds.size, _constrainedSize)) {
+    // Our bounds have changed to a size that is not identical to our constraining size,
+    // so our previous layout information is invalid, and TextKit may draw at the
+    // incorrect origin.
+    _constrainedSize = CGSizeMake(-INFINITY, -INFINITY);
+    [self _invalidateRenderer];
   }
 }
 
@@ -237,6 +277,8 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
     _renderer = [[ASTextNodeRenderer alloc] initWithAttributedString:_attributedString
                                                         truncationString:_composedTruncationString
                                                           truncationMode:_truncationMode
+                                                        maximumLineCount:_maximumLineCount
+                                                          exclusionPaths:_exclusionPaths
                                                          constrainedSize:constrainedSize];
   }
   return _renderer;
@@ -277,7 +319,7 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
 #pragma mark - Modifying User Text
 
 - (void)setAttributedString:(NSAttributedString *)attributedString {
-  if (attributedString == _attributedString) {
+  if (ASObjectIsEqual(attributedString, _attributedString)) {
     return;
   }
 
@@ -290,19 +332,48 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   // We need an entirely new renderer
   [self _invalidateRenderer];
 
-  // Tell the display node superclasses that the cached sizes are incorrect now
-  [self invalidateCalculatedSize];
+  ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+    // Tell the display node superclasses that the cached layout is incorrect now
+    [self invalidateCalculatedLayout];
 
-  [self setNeedsDisplay];
+    [self setNeedsDisplay];
 
-  self.accessibilityLabel = _attributedString.string;
+    self.accessibilityLabel = _attributedString.string;
 
-  if (_attributedString.length == 0) {
-    // We're not an accessibility element by default if there is no string.
-    self.isAccessibilityElement = NO;
-  } else {
-    self.isAccessibilityElement = YES;
+    if (_attributedString.length == 0) {
+      // We're not an accessibility element by default if there is no string.
+      self.isAccessibilityElement = NO;
+    } else {
+      self.isAccessibilityElement = YES;
+    }
+  });
+  
+  if (attributedString.length > 0) {
+    CGFloat screenScale = ASScreenScale();
+    self.ascender = round([[attributedString attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL] ascender] * screenScale)/screenScale;
+    self.descender = round([[attributedString attribute:NSFontAttributeName atIndex:attributedString.length - 1 effectiveRange:NULL] descender] * screenScale)/screenScale;
   }
+}
+
+#pragma mark - Text Layout
+
+- (void)setExclusionPaths:(NSArray *)exclusionPaths
+{
+  if (ASObjectIsEqual(exclusionPaths, _exclusionPaths)) {
+    return;
+  }
+  
+  _exclusionPaths = [exclusionPaths copy];
+  [self _invalidateRenderer];
+  [self invalidateCalculatedLayout];
+  ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+    [self setNeedsDisplay];
+  });
+}
+
+- (NSArray *)exclusionPaths
+{
+  return _exclusionPaths;
 }
 
 #pragma mark - Drawing
@@ -332,7 +403,7 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
 
   // Draw text
   bounds.origin = parameters.textOrigin;
-  [parameters.renderer drawInRect:bounds isRasterizing:isRasterizing];
+  [parameters.renderer drawInRect:bounds inContext:context];
 
   CGContextRestoreGState(context);
 }
@@ -418,8 +489,8 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
 
       // Check if delegate implements optional method, if not assume NO.
       // Should the text be highlightable/touchable?
-      if (![_delegate respondsToSelector:@selector(textNode:shouldHighlightLinkAttribute:value:)] ||
-          ![_delegate textNode:self shouldHighlightLinkAttribute:name value:value]) {
+      if (![_delegate respondsToSelector:@selector(textNode:shouldHighlightLinkAttribute:value:atPoint:)] ||
+          ![_delegate textNode:self shouldHighlightLinkAttribute:name value:value atPoint:point]) {
         value = nil;
         name = nil;
       }
@@ -465,8 +536,11 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
     }
 
     // Ask our delegate if a long-press on an attribute is relevant
-    if ([self.delegate respondsToSelector:@selector(textNode:shouldLongPressLinkAttribute:value:)]) {
-      return [self.delegate textNode:self shouldLongPressLinkAttribute:_highlightedLinkAttributeName value:_highlightedLinkAttributeValue];
+    if ([self.delegate respondsToSelector:@selector(textNode:shouldLongPressLinkAttribute:value:atPoint:)]) {
+      return [self.delegate textNode:self
+        shouldLongPressLinkAttribute:_highlightedLinkAttributeName
+                               value:_highlightedLinkAttributeValue
+                             atPoint:[gestureRecognizer locationInView:self.view]];
     }
 
     // Otherwise we are good to go.
@@ -517,12 +591,24 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
 
         weakHighlightLayer.opacity = 0.0;
 
+        CFTimeInterval beginTime = CACurrentMediaTime();
+        CABasicAnimation *possibleFadeIn = (CABasicAnimation *)[weakHighlightLayer animationForKey:@"opacity"];
+        if (possibleFadeIn) {
+          // Calculate when we should begin fading out based on the end of the fade in animation,
+          // Also check to make sure that the new begin time hasn't already passed
+          CGFloat newBeginTime = (possibleFadeIn.beginTime + possibleFadeIn.duration);
+          if (newBeginTime > beginTime) {
+            beginTime = newBeginTime;
+          }
+        }
+        
         CABasicAnimation *fadeOut = [CABasicAnimation animationWithKeyPath:@"opacity"];
         fadeOut.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        fadeOut.fromValue = @(((CALayer *)weakHighlightLayer.presentationLayer).opacity);
+        fadeOut.fromValue = possibleFadeIn.toValue ?: @(((CALayer *)weakHighlightLayer.presentationLayer).opacity);
         fadeOut.toValue = @0.0;
         fadeOut.fillMode = kCAFillModeBoth;
         fadeOut.duration = ASTextNodeHighlightFadeOutDuration;
+        fadeOut.beginTime = beginTime;
 
         dispatch_block_t prev = [CATransaction completionBlock];
         [CATransaction setCompletionBlock:^{
@@ -554,6 +640,11 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
         for (NSValue *rectValue in highlightRects) {
           CGRect rendererRect = [[self class] _adjustRendererRect:rectValue.CGRectValue forShadowPadding:_shadower.shadowPadding];
           CGRect highlightedRect = [self.layer convertRect:rendererRect toLayer:highlightTargetLayer];
+
+          // We set our overlay layer's frame to the bounds of the highlight target layer.
+          // Offset highlight rects to avoid double-counting target layer's bounds.origin.
+          highlightedRect.origin.x -= highlightTargetLayer.bounds.origin.x;
+          highlightedRect.origin.y -= highlightTargetLayer.bounds.origin.y;
           [converted addObject:[NSValue valueWithCGRect:highlightedRect]];
         }
 
@@ -569,6 +660,7 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
           fadeIn.fromValue = @0.0;
           fadeIn.toValue = @(overlayLayer.opacity);
           fadeIn.duration = ASTextNodeHighlightFadeInDuration;
+          fadeIn.beginTime = CACurrentMediaTime();
 
           [overlayLayer addAnimation:fadeIn forKey:fadeIn.keyPath];
         }
@@ -645,7 +737,73 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   return [self.class _adjustRendererRect:frame forShadowPadding:self.shadowPadding];
 }
 
+#pragma mark - Placeholders
+
+- (void)setPlaceholderColor:(UIColor *)placeholderColor
+{
+  _placeholderColor = placeholderColor;
+
+  // prevent placeholders if we don't have a color
+  self.placeholderEnabled = placeholderColor != nil;
+}
+
+- (UIImage *)placeholderImage
+{
+  // FIXME: Replace this implementation with reusable CALayers that have .backgroundColor set.
+  // This would completely eliminate the memory and performance cost of the backing store.
+  CGSize size = self.calculatedSize;
+  UIGraphicsBeginImageContext(size);
+  [self.placeholderColor setFill];
+
+  ASTextNodeRenderer *renderer = [self _renderer];
+  NSRange textRange = [renderer visibleRange];
+
+  // cap height is both faster and creates less subpixel blending
+  NSArray *lineRects = [self _rectsForTextRange:textRange measureOption:ASTextNodeRendererMeasureOptionLineHeight];
+
+  // fill each line with the placeholder color
+  for (NSValue *rectValue in lineRects) {
+    CGRect lineRect = [rectValue CGRectValue];
+    CGRect fillBounds = CGRectIntegral(UIEdgeInsetsInsetRect(lineRect, self.placeholderInsets));
+
+    if (fillBounds.size.width > 0.0 && fillBounds.size.height > 0.0) {
+      UIRectFill(fillBounds);
+    }
+  }
+
+  UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+  UIGraphicsEndImageContext();
+  return image;
+}
+
 #pragma mark - Touch Handling
+
+-(BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event
+{
+  if (!_passthroughNonlinkTouches) {
+    return [super pointInside:point withEvent:event];
+  }
+
+  NSRange range = NSMakeRange(0, 0);
+  NSString *linkAttributeName = nil;
+  BOOL inAdditionalTruncationMessage = NO;
+
+  id linkAttributeValue = [self _linkAttributeValueAtPoint:point
+                                             attributeName:&linkAttributeName
+                                                     range:&range
+                             inAdditionalTruncationMessage:&inAdditionalTruncationMessage];
+
+  NSUInteger lastCharIndex = NSIntegerMax;
+  BOOL linkCrossesVisibleRange = (lastCharIndex > range.location) && (lastCharIndex < NSMaxRange(range) - 1);
+
+  if (inAdditionalTruncationMessage) {
+    return YES;
+  } else if (range.length && !linkCrossesVisibleRange && linkAttributeValue != nil && linkAttributeName != nil) {
+    return YES;
+  } else {
+    return NO;
+  }
+}
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event
 {
@@ -748,7 +906,9 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
     }
     _shadowColor = shadowColor;
     [self _invalidateShadower];
-    [self setNeedsDisplay];
+    ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+      [self setNeedsDisplay];
+    });
   }
 }
 
@@ -762,7 +922,9 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   if (!CGSizeEqualToSize(_shadowOffset, shadowOffset)) {
     _shadowOffset = shadowOffset;
     [self _invalidateShadower];
-    [self setNeedsDisplay];
+    ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+      [self setNeedsDisplay];
+    });
   }
 }
 
@@ -776,7 +938,9 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   if (_shadowOpacity != shadowOpacity) {
     _shadowOpacity = shadowOpacity;
     [self _invalidateShadower];
-    [self setNeedsDisplay];
+    ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+      [self setNeedsDisplay];
+    });
   }
 }
 
@@ -790,7 +954,9 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   if (_shadowRadius != shadowRadius) {
     _shadowRadius = shadowRadius;
     [self _invalidateShadower];
-    [self setNeedsDisplay];
+    ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+      [self setNeedsDisplay];
+    });
   }
 }
 
@@ -801,30 +967,34 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
 
 #pragma mark - Truncation Message
 
+static NSAttributedString *DefaultTruncationAttributedString()
+{
+  static NSAttributedString *defaultTruncationAttributedString;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    defaultTruncationAttributedString = [[NSAttributedString alloc] initWithString:NSLocalizedString(@"\u2026", @"Default truncation string")];
+  });
+  return defaultTruncationAttributedString;
+}
+
 - (void)setTruncationAttributedString:(NSAttributedString *)truncationAttributedString
 {
-  // No-op if they're exactly equal (avoid redrawing)
-  if (_truncationAttributedString == truncationAttributedString) {
+  if (ASObjectIsEqual(_truncationAttributedString, truncationAttributedString)) {
     return;
   }
 
-  if (![_truncationAttributedString isEqual:truncationAttributedString]) {
-    _truncationAttributedString = [truncationAttributedString copy];
-    [self _invalidateTruncationString];
-  }
+  _truncationAttributedString = [truncationAttributedString copy];
+  [self _invalidateTruncationString];
 }
 
 - (void)setAdditionalTruncationMessage:(NSAttributedString *)additionalTruncationMessage
 {
-  // Short circuit if we're setting to nil (prevent redrawing when we don't need to)
-  if (_additionalTruncationMessage == additionalTruncationMessage) {
+  if (ASObjectIsEqual(_additionalTruncationMessage, additionalTruncationMessage)) {
     return;
   }
 
-  if (![_additionalTruncationMessage isEqual:additionalTruncationMessage]) {
-    _additionalTruncationMessage = [additionalTruncationMessage copy];
-    [self _invalidateTruncationString];
-  }
+  _additionalTruncationMessage = [additionalTruncationMessage copy];
+  [self _invalidateTruncationString];
 }
 
 - (void)setTruncationMode:(NSLineBreakMode)truncationMode
@@ -832,13 +1002,26 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
   if (_truncationMode != truncationMode) {
     _truncationMode = truncationMode;
     [self _invalidateRenderer];
-    [self setNeedsDisplay];
+    ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+      [self setNeedsDisplay];
+    });
   }
 }
 
 - (BOOL)isTruncated
 {
   return [[self _renderer] truncationStringCharacterRange].location != NSNotFound;
+}
+
+- (void)setMaximumLineCount:(NSUInteger)maximumLineCount
+{
+    if (_maximumLineCount != maximumLineCount) {
+        _maximumLineCount = maximumLineCount;
+      [self _invalidateRenderer];
+      ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+        [self setNeedsDisplay];
+      });
+    }
 }
 
 - (NSUInteger)lineCount
@@ -852,7 +1035,9 @@ ASDISPLAYNODE_INLINE CGFloat ceilPixelValue(CGFloat f)
 {
   _composedTruncationString = [self _prepareTruncationStringForDrawing:[self _composedTruncationString]];
   [self _invalidateRenderer];
-  [self setNeedsDisplay];
+  ASDisplayNodeRespectThreadAffinityOfNode(self, ^{
+    [self setNeedsDisplay];
+  });
 }
 
 /**

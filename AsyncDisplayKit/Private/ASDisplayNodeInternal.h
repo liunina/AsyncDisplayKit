@@ -17,22 +17,32 @@
 #import "ASDisplayNode.h"
 #import "ASSentinel.h"
 #import "ASThread.h"
+#import "ASLayoutOptions.h"
 
 BOOL ASDisplayNodeSubclassOverridesSelector(Class subclass, SEL selector);
-CGFloat ASDisplayNodeScreenScale();
-void ASDisplayNodePerformBlockOnMainThread(void (^block)());
+void ASDisplayNodeRespectThreadAffinityOfNode(ASDisplayNode *node, void (^block)());
+
+typedef NS_OPTIONS(NSUInteger, ASDisplayNodeMethodOverrides) {
+  ASDisplayNodeMethodOverrideNone = 0,
+  ASDisplayNodeMethodOverrideTouchesBegan          = 1 << 0,
+  ASDisplayNodeMethodOverrideTouchesCancelled      = 1 << 1,
+  ASDisplayNodeMethodOverrideTouchesEnded          = 1 << 2,
+  ASDisplayNodeMethodOverrideTouchesMoved          = 1 << 3,
+  ASDisplayNodeMethodOverrideLayoutSpecThatFits    = 1 << 4
+};
 
 @class _ASPendingState;
 
 // Allow 2^n increments of begin disabling hierarchy notifications
-#define visibilityNotificationsDisabledBits 4
+#define VISIBILITY_NOTIFICATIONS_DISABLED_BITS 4
 
 #define TIME_DISPLAYNODE_OPS (DEBUG || PROFILE)
 
 @interface ASDisplayNode () <_ASDisplayLayerDelegate>
 {
 @protected
-  ASDN::RecursiveMutex _propertyLock;  // Protects access to the _view, _pendingViewState, _subnodes, _supernode, _renderingSubnodes, and other properties which are accessed from multiple threads.
+  // Protects access to _view, _layer, _pendingViewState, _subnodes, _supernode, and other properties which are accessed from multiple threads.
+  ASDN::RecursiveMutex _propertyLock;
 
   ASDisplayNode * __weak _supernode;
 
@@ -42,33 +52,47 @@ void ASDisplayNodePerformBlockOnMainThread(void (^block)());
   // This is the desired contentsScale, not the scale at which the layer's contents should be displayed
   CGFloat _contentsScaleForDisplay;
 
-  CGSize _size;
-  CGSize _constrainedSize;
+  ASLayout *_layout;
+  ASSizeRange _constrainedSize;
   UIEdgeInsets _hitTestSlop;
   NSMutableArray *_subnodes;
 
+  ASDisplayNodeViewBlock _viewBlock;
+  ASDisplayNodeLayerBlock _layerBlock;
+  ASDisplayNodeDidLoadBlock _nodeLoadedBlock;
   Class _viewClass;
   Class _layerClass;
   UIView *_view;
   CALayer *_layer;
 
+  UIImage *_placeholderImage;
+  CALayer *_placeholderLayer;
+
+  // keeps track of nodes/subnodes that have not finished display, used with placeholders
+  NSMutableSet *_pendingDisplayNodes;
+
   _ASPendingState *_pendingViewState;
 
-  struct {
-    unsigned implementsDisplay:1;
-    unsigned isSynchronous:1;
-    unsigned isLayerBacked:1;
-    unsigned sizeCalculated:1;
-    unsigned preventOrCancelDisplay:1;
+  struct ASDisplayNodeFlags {
+    // public properties
+    unsigned synchronous:1;
+    unsigned layerBacked:1;
     unsigned displaysAsynchronously:1;
     unsigned shouldRasterizeDescendants:1;
-    unsigned visibilityNotificationsDisabled:visibilityNotificationsDisabledBits;
-    unsigned isInEnterHierarchy:1;
-    unsigned isInExitHierarchy:1;
-    unsigned inWindow:1;
-    unsigned hasWillDisplayAsyncLayer:1;
-    unsigned hasDrawParametersForAsyncLayer:1;
-    unsigned hasClassDisplay:1;
+    unsigned shouldBypassEnsureDisplay:1;
+    unsigned displaySuspended:1;
+
+    // whether custom drawing is enabled
+    unsigned implementsDrawRect:1;
+    unsigned implementsImageDisplay:1;
+    unsigned implementsDrawParameters:1;
+
+    // internal state
+    unsigned isMeasured:1;
+    unsigned isEnteringHierarchy:1;
+    unsigned isExitingHierarchy:1;
+    unsigned isInHierarchy:1;
+    unsigned visibilityNotificationsDisabled:VISIBILITY_NOTIFICATIONS_DISABLED_BITS;
   } _flags;
 
   ASDisplayNodeExtraIvars _extra;
@@ -89,29 +113,50 @@ void ASDisplayNodePerformBlockOnMainThread(void (^block)());
 // Creates a pendingViewState if one doesn't exist. Allows setting view properties on a bg thread before there is a view.
 @property (atomic, retain, readonly) _ASPendingState *pendingViewState;
 
+// Bitmask to check which methods an object overrides.
+@property (nonatomic, assign, readonly) ASDisplayNodeMethodOverrides methodOverrides;
+
 // Swizzle to extend the builtin functionality with custom logic
 - (BOOL)__shouldLoadViewOrLayer;
 - (BOOL)__shouldSize;
 - (void)__exitedHierarchy;
 
+// Core implementation of -measureWithSizeRange:. Must be called with _propertyLock held.
+- (ASLayout *)__measureWithSizeRange:(ASSizeRange)constrainedSize;
+
+- (void)__setNeedsLayout;
+/**
+ * Sets a new frame to this node by changing its bounds and position. This method can be safely called even if the transform property 
+ * contains a non-identity transform, because bounds and position can be changed in such case.
+ */
+- (void)__setSafeFrame:(CGRect)rect;
 - (void)__layout;
 - (void)__setSupernode:(ASDisplayNode *)supernode;
 
-// The visibility state of the node.  Changed before calling willAppear, willDisappear, and didDisappear.
-@property (nonatomic, readwrite, assign, getter = isInWindow) BOOL inWindow;
+// Changed before calling willEnterHierarchy / didExitHierarchy.
+@property (nonatomic, readwrite, assign, getter = isInHierarchy) BOOL inHierarchy;
 
-// Private API for helper funcitons / unit tests. Use ASDisplayNodeDisableHierarchyNotifications() to control this.
+// Private API for helper functions / unit tests.  Use ASDisplayNodeDisableHierarchyNotifications() to control this.
 - (BOOL)__visibilityNotificationsDisabled;
 - (void)__incrementVisibilityNotificationsDisabled;
 - (void)__decrementVisibilityNotificationsDisabled;
 
-// Call willEnterHierarchy if necessary and set inWindow = YES if visibility notifications are enabled on all of its parents
+// Call willEnterHierarchy if necessary and set inHierarchy = YES if visibility notifications are enabled on all of its parents
 - (void)__enterHierarchy;
-// Call didExitHierarchy if necessary and set inWindow = NO if visibility notifications are enabled on all of its parents
+// Call didExitHierarchy if necessary and set inHierarchy = NO if visibility notifications are enabled on all of its parents
 - (void)__exitHierarchy;
+
+// Display the node's view/layer immediately on the current thread, bypassing the background thread rendering. Will be deprecated.
+- (void)displayImmediately;
 
 // Returns the ancestor node that rasterizes descendants, or nil if none.
 - (ASDisplayNode *)__rasterizedContainerNode;
+
+// Alternative initialiser for backing with a custom view class.  Supports asynchronous display with _ASDisplayView subclasses.
+- (id)initWithViewClass:(Class)viewClass;
+
+// Alternative initialiser for backing with a custom layer class.  Supports asynchronous display with _ASDisplayLayer subclasses.
+- (id)initWithLayerClass:(Class)layerClass;
 
 @property (nonatomic, assign) CGFloat contentsScaleForDisplay;
 

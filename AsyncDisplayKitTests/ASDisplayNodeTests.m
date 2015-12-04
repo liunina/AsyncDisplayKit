@@ -11,26 +11,39 @@
 #import <XCTest/XCTest.h>
 
 #import "_ASDisplayLayer.h"
+#import "_ASDisplayView.h"
 #import "ASDisplayNode+Subclasses.h"
 #import "ASDisplayNodeTestsHelper.h"
 #import "UIView+ASConvenience.h"
 
 // Conveniences for making nodes named a certain way
-
 #define DeclareNodeNamed(n) ASDisplayNode *n = [[ASDisplayNode alloc] init]; n.name = @#n
-#define DeclareViewNamed(v) UIView *v = [[UIView alloc] init]; v.layer.asyncdisplaykit_name = @#v
-#define DeclareLayerNamed(l) CALayer *l = [[CALayer alloc] init]; l.asyncdisplaykit_name = @#l
+#define DeclareViewNamed(v) UIView *v = viewWithName(@#v)
+#define DeclareLayerNamed(l) CALayer *l = layerWithName(@#l)
+
+static UIView *viewWithName(NSString *name) {
+  ASDisplayNode *n = [[ASDisplayNode alloc] init];
+  n.name = name;
+  return n.view;
+}
+
+static CALayer *layerWithName(NSString *name) {
+  ASDisplayNode *n = [[ASDisplayNode alloc] init];
+  n.layerBacked = YES;
+  n.name = name;
+  return n.layer;
+}
 
 static NSString *orderStringFromSublayers(CALayer *l) {
-  return [[[l.sublayers valueForKey:@"asyncdisplaykit_name"] allObjects] componentsJoinedByString:@","];
+  return [[l.sublayers valueForKey:@"name"] componentsJoinedByString:@","];
 }
 
 static NSString *orderStringFromSubviews(UIView *v) {
-  return [[[v.subviews valueForKeyPath:@"layer.asyncdisplaykit_name"] allObjects] componentsJoinedByString:@","];
+  return [[v.subviews valueForKey:@"name"] componentsJoinedByString:@","];
 }
 
 static NSString *orderStringFromSubnodes(ASDisplayNode *n) {
-  return [[[n.subnodes valueForKey:@"name"] allObjects] componentsJoinedByString:@","];
+  return [[n.subnodes valueForKey:@"name"] componentsJoinedByString:@","];
 }
 
 // Asserts subnode, subview, sublayer order match what you provide here
@@ -60,14 +73,17 @@ for (ASDisplayNode *n in @[ nodes ]) {\
 
 
 @interface ASDisplayNode (HackForTests)
-
 + (dispatch_queue_t)asyncSizingQueue;
-
+- (id)initWithViewClass:(Class)viewClass;
+- (id)initWithLayerClass:(Class)layerClass;
 @end
 
 @interface ASTestDisplayNode : ASDisplayNode
 @property (atomic, copy) void (^willDeallocBlock)(ASTestDisplayNode *node);
 @property (atomic, copy) CGSize(^calculateSizeBlock)(ASTestDisplayNode *node, CGSize size);
+@end
+
+@interface ASTestResponderNode : ASTestDisplayNode
 @end
 
 @implementation ASTestDisplayNode
@@ -87,12 +103,85 @@ for (ASDisplayNode *n in @[ nodes ]) {\
 
 @end
 
+@interface UIDisplayNodeTestView : UIView
+@end
+
+@interface UIResponderNodeTestView : _ASDisplayView
+@property(nonatomic) BOOL isFirstResponder;
+@end
+
+@implementation UIDisplayNodeTestView
+@end
+
+@interface ASTestWindow : UIWindow
+@end
+
+@implementation ASTestWindow
+
+- (id)firstResponder {
+  return self.subviews.firstObject;
+}
+
+@end
+
+@implementation ASTestResponderNode
+
++ (Class)viewClass {
+  return [UIResponderNodeTestView class];
+}
+
+- (BOOL)canBecomeFirstResponder {
+  return YES;
+}
+
+@end
+
+@implementation UIResponderNodeTestView
+
+- (BOOL)becomeFirstResponder {
+  self.isFirstResponder = YES;
+  return YES;
+}
+
+- (BOOL)canResignFirstResponder {
+  return YES;
+}
+
+- (BOOL)resignFirstResponder {
+  if (self.isFirstResponder) {
+    self.isFirstResponder = NO;
+    return YES;
+  }
+  return NO;
+}
+
+@end
+
 @interface ASDisplayNodeTests : XCTestCase
 @end
 
 @implementation ASDisplayNodeTests
 {
   dispatch_queue_t queue;
+}
+
+- (void)testOverriddenFirstResponderBehavior {
+  ASTestDisplayNode *node = [[ASTestResponderNode alloc] init];
+  XCTAssertTrue([node canBecomeFirstResponder]);
+  XCTAssertTrue([node becomeFirstResponder]);
+}
+
+- (void)testDefaultFirstResponderBehavior {
+  ASTestDisplayNode *node = [[ASTestDisplayNode alloc] init];
+  XCTAssertFalse([node canBecomeFirstResponder]);
+  XCTAssertFalse([node becomeFirstResponder]);
+}
+
+- (void)testLayerBackedFirstResponderBehavior {
+  ASTestDisplayNode *node = [[ASTestResponderNode alloc] init];
+  node.layerBacked = YES;
+  XCTAssertTrue([node canBecomeFirstResponder]);
+  XCTAssertFalse([node becomeFirstResponder]);
 }
 
 - (void)setUp
@@ -116,6 +205,53 @@ for (ASDisplayNode *n in @[ nodes ]) {\
 
   UIView *view = node.view;
   XCTAssertNotNil(view, @"Getting node's view on-thread should succeed.");
+}
+
+- (void)testNodeCreatedOffThreadWithExistingView
+{
+  UIView *view = [[UIDisplayNodeTestView alloc] init];
+
+  __block ASDisplayNode *node = nil;
+  [self executeOffThread:^{
+    node = [[ASDisplayNode alloc] initWithViewBlock:^UIView *{
+      return view;
+    }];
+  }];
+
+  XCTAssertFalse(node.layerBacked, @"Can't be layer backed");
+  XCTAssertTrue(node.synchronous, @"Node with plain view should be synchronous");
+  XCTAssertFalse(node.nodeLoaded, @"Shouldn't have a view yet");
+  XCTAssertEqual(view, node.view, @"Getting node's view on-thread should succeed.");
+}
+
+- (void)testNodeCreatedOffThreadWithLazyView
+{
+  __block UIView *view = nil;
+  __block ASDisplayNode *node = nil;
+  [self executeOffThread:^{
+    node = [[ASDisplayNode alloc] initWithViewBlock:^UIView *{
+      XCTAssertTrue([NSThread isMainThread], @"View block must run on the main queue");
+      view = [[UIDisplayNodeTestView alloc] init];
+      return view;
+    }];
+  }];
+
+  XCTAssertNil(view, @"View block should not be invoked yet");
+  [node view];
+  XCTAssertNotNil(view, @"View block should have been invoked");
+  XCTAssertEqual(view, node.view, @"Getting node's view on-thread should succeed.");
+  XCTAssertTrue(node.synchronous, @"Node with plain view should be synchronous");
+}
+
+- (void)testNodeCreatedWithLazyAsyncView
+{
+  ASDisplayNode *node = [[ASDisplayNode alloc] initWithViewBlock:^UIView *{
+    XCTAssertTrue([NSThread isMainThread], @"View block must run on the main queue");
+    return [[_ASDisplayView alloc] init];
+  }];
+
+  XCTAssertThrows([node view], @"Externally provided views should be synchronous");
+  XCTAssertTrue(node.synchronous, @"Node with externally provided view should be synchronous");
 }
 
 - (void)checkValuesMatchDefaults:(ASDisplayNode *)node isLayerBacked:(BOOL)isLayerBacked
@@ -149,7 +285,7 @@ for (ASDisplayNode *n in @[ nodes ]) {\
   XCTAssertEqual(3.f, node.shadowRadius, @"default shadowRadius broken %@", hasLoadedView);
   XCTAssertEqual(0.0f, node.borderWidth, @"default borderWidth broken %@", hasLoadedView);
   XCTAssertEqualObjects(rgbBlackCGColorIdPtr, (id)node.borderColor, @"default borderColor broken %@", hasLoadedView);
-  XCTAssertEqual(NO, node.preventOrCancelDisplay, @"default preventOrCancelDisplay broken %@", hasLoadedView);
+  XCTAssertEqual(NO, node.displaySuspended, @"default displaySuspended broken %@", hasLoadedView);
   XCTAssertEqual(YES, node.displaysAsynchronously, @"default displaysAsynchronously broken %@", hasLoadedView);
   XCTAssertEqual(NO, node.asyncdisplaykit_asyncTransactionContainer, @"default asyncdisplaykit_asyncTransactionContainer broken %@", hasLoadedView);
   XCTAssertEqualObjects(nil, node.name, @"default name broken %@", hasLoadedView);
@@ -245,8 +381,8 @@ for (ASDisplayNode *n in @[ nodes ]) {\
   XCTAssertEqual(.5f, node.shadowRadius, @"shadowRadius broken %@", hasLoadedView);
   XCTAssertEqual(.5f, node.borderWidth, @"borderWidth broken %@", hasLoadedView);
   XCTAssertEqual([[UIColor orangeColor] CGColor], node.borderColor, @"borderColor broken %@", hasLoadedView);
-  XCTAssertEqual(YES, node.preventOrCancelDisplay, @"preventOrCancelDisplay broken %@", hasLoadedView);
-  XCTAssertEqual(NO, node.displaysAsynchronously, @"preventOrCancelDisplay broken %@", hasLoadedView);
+  XCTAssertEqual(YES, node.displaySuspended, @"displaySuspended broken %@", hasLoadedView);
+  XCTAssertEqual(NO, node.displaysAsynchronously, @"displaySuspended broken %@", hasLoadedView);
   XCTAssertEqual(YES, node.asyncdisplaykit_asyncTransactionContainer, @"asyncTransactionContainer broken %@", hasLoadedView);
   XCTAssertEqual(NO, node.userInteractionEnabled, @"userInteractionEnabled broken %@", hasLoadedView);
   XCTAssertEqual((BOOL)!isLayerBacked, node.exclusiveTouch, @"exclusiveTouch broken %@", hasLoadedView);
@@ -298,7 +434,7 @@ for (ASDisplayNode *n in @[ nodes ]) {\
     node.shadowRadius = .5f;
     node.borderWidth = .5f;
     node.borderColor = [[UIColor orangeColor] CGColor];
-    node.preventOrCancelDisplay = YES;
+    node.displaySuspended = YES;
     node.displaysAsynchronously = NO;
     node.asyncdisplaykit_asyncTransactionContainer = YES;
     node.userInteractionEnabled = NO;
@@ -348,6 +484,92 @@ for (ASDisplayNode *n in @[ nodes ]) {\
 - (void)testSimpleCALayerBridgePropertiesSetOffThreadPropagate
 {
   [self checkSimpleBridgePropertiesSetPropagate:YES];
+}
+
+- (void)testPropertiesSetOffThreadBeforeLoadingExternalView
+{
+  UIView *view = [[UIDisplayNodeTestView alloc] init];
+
+  __block ASDisplayNode *node = nil;
+  [self executeOffThread:^{
+    node = [[ASDisplayNode alloc] initWithViewBlock:^{
+      return view;
+    }];
+    node.backgroundColor = [UIColor blueColor];
+    node.frame = CGRectMake(10, 20, 30, 40);
+    node.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    node.userInteractionEnabled = YES;
+  }];
+
+  [self checkExternalViewAppliedPropertiesMatch:node];
+}
+
+- (void)testPropertiesSetOnThreadAfterLoadingExternalView
+{
+  UIView *view = [[UIDisplayNodeTestView alloc] init];
+  ASDisplayNode *node = [[ASDisplayNode alloc] initWithViewBlock:^{
+    return view;
+  }];
+
+  // Load the backing view first
+  [node view];
+
+  node.backgroundColor = [UIColor blueColor];
+  node.frame = CGRectMake(10, 20, 30, 40);
+  node.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+  node.userInteractionEnabled = YES;
+
+  [self checkExternalViewAppliedPropertiesMatch:node];
+}
+
+- (void)checkExternalViewAppliedPropertiesMatch:(ASDisplayNode *)node
+{
+  UIView *view = node.view;
+
+  XCTAssertEqualObjects([UIColor blueColor], view.backgroundColor, @"backgroundColor not propagated to view");
+  XCTAssertTrue(CGRectEqualToRect(CGRectMake(10, 20, 30, 40), view.frame), @"frame not propagated to view");
+  XCTAssertEqual(UIViewAutoresizingFlexibleWidth, view.autoresizingMask, @"autoresizingMask not propagated to view");
+  XCTAssertEqual(YES, view.userInteractionEnabled, @"userInteractionEnabled not propagated to view");
+}
+
+- (void)testPropertiesSetOffThreadBeforeLoadingExternalLayer
+{
+  CALayer *layer = [[CAShapeLayer alloc] init];
+
+  __block ASDisplayNode *node = nil;
+  [self executeOffThread:^{
+    node = [[ASDisplayNode alloc] initWithLayerBlock:^{
+      return layer;
+    }];
+    node.backgroundColor = [UIColor blueColor];
+    node.frame = CGRectMake(10, 20, 30, 40);
+  }];
+
+  [self checkExternalLayerAppliedPropertiesMatch:node];
+}
+
+- (void)testPropertiesSetOnThreadAfterLoadingExternalLayer
+{
+  CALayer *layer = [[CAShapeLayer alloc] init];
+  ASDisplayNode *node = [[ASDisplayNode alloc] initWithLayerBlock:^{
+    return layer;
+  }];
+
+  // Load the backing layer first
+  [node layer];
+
+  node.backgroundColor = [UIColor blueColor];
+  node.frame = CGRectMake(10, 20, 30, 40);
+
+  [self checkExternalLayerAppliedPropertiesMatch:node];
+}
+
+- (void)checkExternalLayerAppliedPropertiesMatch:(ASDisplayNode *)node
+{
+  CALayer *layer = node.layer;
+
+  XCTAssertTrue(CGColorEqualToColor([UIColor blueColor].CGColor, layer.backgroundColor), @"backgroundColor not propagated to layer");
+  XCTAssertTrue(CGRectEqualToRect(CGRectMake(10, 20, 30, 40), layer.frame), @"frame not propagated to layer");
 }
 
 
@@ -694,9 +916,9 @@ static void _addTonsOfSubnodes(ASDisplayNode *parent, NSUInteger fanout, NSUInte
 }
 
 static inline BOOL _CGPointEqualToPointWithEpsilon(CGPoint point1, CGPoint point2, CGFloat epsilon) {
-  CGFloat absEpsilon =  fabsf(epsilon);
-  BOOL xOK = fabsf(point1.x - point2.x) < absEpsilon;
-  BOOL yOK = fabsf(point1.y - point2.y) < absEpsilon;
+  CGFloat absEpsilon =  fabs(epsilon);
+  BOOL xOK = fabs(point1.x - point2.x) < absEpsilon;
+  BOOL yOK = fabs(point1.y - point2.y) < absEpsilon;
   return xOK && yOK;
 }
 
@@ -1164,7 +1386,6 @@ static inline BOOL _CGPointEqualToPointWithEpsilon(CGPoint point1, CGPoint point
   DeclareNodeNamed(b);
   DeclareNodeNamed(c);
   DeclareViewNamed(d);
-  DeclareLayerNamed(e);
 
   [parent layer];
 
@@ -1355,6 +1576,46 @@ static inline BOOL _CGPointEqualToPointWithEpsilon(CGPoint point1, CGPoint point
   [c release];
 }
 
+- (void)testSubnodeAddedBeforeLoadingExternalView
+{
+  UIView *view = [[UIDisplayNodeTestView alloc] init];
+
+  __block ASDisplayNode *parent = nil;
+  __block ASDisplayNode *child = nil;
+  [self executeOffThread:^{
+    parent = [[ASDisplayNode alloc] initWithViewBlock:^{
+      return view;
+    }];
+    child = [[ASDisplayNode alloc] init];
+    [parent addSubnode:child];
+  }];
+
+  XCTAssertEqual(1, parent.subnodes.count, @"Parent should have 1 subnode");
+  XCTAssertEqualObjects(parent, child.supernode, @"Child has the wrong parent");
+  XCTAssertEqual(0, view.subviews.count, @"View shouldn't have any subviews");
+
+  [parent view];
+
+  XCTAssertEqual(1, view.subviews.count, @"View should have 1 subview");
+}
+
+- (void)testSubnodeAddedAfterLoadingExternalView
+{
+  UIView *view = [[UIDisplayNodeTestView alloc] init];
+  ASDisplayNode *parent = [[ASDisplayNode alloc] initWithViewBlock:^{
+    return view;
+  }];
+
+  [parent view];
+
+  ASDisplayNode *child = [[ASDisplayNode alloc] init];
+  [parent addSubnode:child];
+
+  XCTAssertEqual(1, parent.subnodes.count, @"Parent should have 1 subnode");
+  XCTAssertEqualObjects(parent, child.supernode, @"Child has the wrong parent");
+  XCTAssertEqual(1, view.subviews.count, @"View should have 1 subview");
+}
+
 - (void)checkBackgroundColorOpaqueRelationshipWithViewLoaded:(BOOL)loaded layerBacked:(BOOL)isLayerBacked
 {
   ASDisplayNode *node = [[ASDisplayNode alloc] init];
@@ -1500,5 +1761,16 @@ static bool stringContainsPointer(NSString *description, const void *p) {
   [self checkNameInDescriptionIsLayerBacked:NO];
 }
 
+- (void)testBounds
+{
+  ASDisplayNode *node = [[ASDisplayNode alloc] init];
+  node.bounds = CGRectMake(1, 2, 3, 4);
+  node.frame = CGRectMake(5, 6, 7, 8);
+
+  XCTAssert(node.bounds.origin.x == 1, @"Wrong ASDisplayNode.bounds.origin.x");
+  XCTAssert(node.bounds.origin.y == 2, @"Wrong ASDisplayNode.bounds.origin.y");
+  XCTAssert(node.bounds.size.width == 7, @"Wrong ASDisplayNode.bounds.size.width");
+  XCTAssert(node.bounds.size.height == 8, @"Wrong ASDisplayNode.bounds.size.height");
+}
 
 @end
